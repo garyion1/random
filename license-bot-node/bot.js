@@ -4,6 +4,7 @@ const {
   SlashCommandBuilder,
   REST,
   Routes,
+  PermissionFlagsBits,
 } = require('discord.js');
 const db = require('./db');
 
@@ -15,11 +16,20 @@ const ADMIN_USER_IDS = new Set(
 );
 const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID || null;
 
+// Off by default: treat anyone with the server's own Administrator
+// permission as a bot admin too, on top of ADMIN_USER_IDS/ADMIN_ROLE_ID.
+// Only turn this on for servers where you trust everyone with that
+// permission to hand out and revoke license keys.
+const TRUST_SERVER_ADMINS = process.env.TRUST_SERVER_ADMINS === 'true';
+
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 function isAdmin(interaction) {
   if (ADMIN_USER_IDS.has(interaction.user.id)) return true;
   if (ADMIN_ROLE_ID && interaction.member?.roles?.cache?.has(ADMIN_ROLE_ID)) return true;
+  if (TRUST_SERVER_ADMINS && interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+    return true;
+  }
   return false;
 }
 

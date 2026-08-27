@@ -12,7 +12,12 @@ auto-revokes.
 - **Discord bot** (`bot.js`): admins run `/genkey @user` to mint a key,
   DM'd to them automatically. Users check their own with `/mykeys`. Admins
   can `/revoke` a key, `/unbind` it (reset to unbound, e.g. for a legitimate
-  account change), or `/lookup` one for support.
+  account change), or `/lookup` one for support. "Admin" means listed in
+  `ADMIN_USER_IDS`, holding `ADMIN_ROLE_ID`, or — if you set
+  `TRUST_SERVER_ADMINS=true` — anyone with the Discord server's own
+  Administrator permission. That last one is off by default; only turn it
+  on for a server where you trust everyone with that permission to hand out
+  and revoke keys.
 - **HTTP API** (`api.js`, Express): exposes `POST /validate`, which the mod
   calls on startup (and periodically after that, if you wire up
   `LicenseGate.startPeriodicRecheck` — see `mod-integration/`) with the
