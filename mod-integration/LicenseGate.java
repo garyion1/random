@@ -1,0 +1,179 @@
+package me.tpaburst;
+
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.client.MinecraftClient;
+
+import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Properties;
+import java.util.function.Consumer;
+
+/**
+ * Reference implementation, not drop-in code: adapt names/paths to your
+ * actual project layout. Wire {@link #check(Consumer)} into a
+ * ClientLifecycleEvents.CLIENT_STARTED listener from TPABurstAddon#onInitialize,
+ * and only register your real modules in the callback once check() reports
+ * success — see the comment at the bottom for the wiring.
+ *
+ * Point LICENSE_API_URL at wherever you deployed license-bot/, and set
+ * API_SHARED_SECRET to the same value as that server's API_SHARED_SECRET env var.
+ */
+public final class LicenseGate {
+    private static final String LICENSE_API_URL = "https://license.yourdomain.com/validate";
+    private static final String API_SHARED_SECRET = "REPLACE_WITH_YOUR_SHARED_SECRET";
+
+    // If the server is unreachable (not: reachable-but-invalid), allow the
+    // mod to keep working on a cached success for this long before requiring
+    // a fresh check. Set to Duration.ZERO to always require a live check.
+    private static final Duration OFFLINE_GRACE = Duration.ofHours(72);
+
+    private static final Path CONFIG_DIR = FabricLoader.getInstance().getConfigDir().resolve("tpa-tools");
+    private static final Path LICENSE_KEY_FILE = CONFIG_DIR.resolve("license.txt");
+    private static final Path CACHE_FILE = CONFIG_DIR.resolve("license-cache.txt");
+
+    private static final Gson GSON = new Gson();
+    private static final HttpClient HTTP = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(10))
+        .build();
+
+    private LicenseGate() {}
+
+    public enum Result { VALID, INVALID, UNREACHABLE_BUT_CACHED }
+
+    /**
+     * Runs the license check off-thread and calls back on completion.
+     * onResult receives VALID (register your modules) or anything else
+     * (don't -- and tell the player why via chat/log).
+     */
+    public static void check(Consumer<Result> onResult) {
+        Thread thread = new Thread(() -> onResult.accept(checkBlocking()), "tpa-tools-license-check");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    private static Result checkBlocking() {
+        String key = readLicenseKey();
+        if (key == null || key.isBlank()) {
+            System.err.println("[TPA Tools] No license key configured in " + LICENSE_KEY_FILE);
+            return Result.INVALID;
+        }
+
+        MinecraftClient client = MinecraftClient.getInstance();
+        String uuid = client.getSession().getUuidOrNull() != null
+            ? client.getSession().getUuidOrNull().toString()
+            : null;
+        String username = client.getSession().getUsername();
+
+        if (uuid == null) {
+            System.err.println("[TPA Tools] No Minecraft session yet, denying by default.");
+            return Result.INVALID;
+        }
+
+        JsonObject body = new JsonObject();
+        body.addProperty("key", key.trim());
+        body.addProperty("minecraft_uuid", uuid);
+        body.addProperty("minecraft_username", username);
+
+        HttpRequest request = HttpRequest.newBuilder()
+            .uri(URI.create(LICENSE_API_URL))
+            .header("Content-Type", "application/json")
+            .header("X-Api-Secret", API_SHARED_SECRET)
+            .timeout(Duration.ofSeconds(10))
+            .POST(HttpRequest.BodyPublishers.ofString(GSON.toJson(body), StandardCharsets.UTF_8))
+            .build();
+
+        try {
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            JsonObject json = GSON.fromJson(response.body(), JsonObject.class);
+            boolean valid = json.has("valid") && json.get("valid").getAsBoolean();
+
+            if (valid) {
+                writeCache(true);
+                return Result.VALID;
+            }
+
+            String reason = json.has("reason") ? json.get("reason").getAsString() : "unknown";
+            System.err.println("[TPA Tools] License invalid: " + reason);
+            writeCache(false);
+            return Result.INVALID;
+        } catch (IOException | InterruptedException e) {
+            System.err.println("[TPA Tools] Could not reach license server: " + e.getMessage());
+            return checkCacheForGracePeriod();
+        }
+    }
+
+    private static String readLicenseKey() {
+        try {
+            if (!Files.exists(LICENSE_KEY_FILE)) return null;
+            return Files.readString(LICENSE_KEY_FILE, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    private static void writeCache(boolean valid) {
+        try {
+            Files.createDirectories(CONFIG_DIR);
+            Properties props = new Properties();
+            props.setProperty("valid", String.valueOf(valid));
+            props.setProperty("checkedAt", Instant.now().toString());
+            try (var out = Files.newOutputStream(CACHE_FILE)) {
+                props.store(out, "TPA Tools license cache -- do not edit");
+            }
+        } catch (IOException ignored) {
+            // Cache is best-effort; failing to write it just means no offline grace period next time.
+        }
+    }
+
+    private static Result checkCacheForGracePeriod() {
+        try {
+            if (!Files.exists(CACHE_FILE)) return Result.INVALID;
+            Properties props = new Properties();
+            try (var in = Files.newInputStream(CACHE_FILE)) {
+                props.load(in);
+            }
+            boolean wasValid = Boolean.parseBoolean(props.getProperty("valid", "false"));
+            Instant checkedAt = Instant.parse(props.getProperty("checkedAt"));
+            if (wasValid && Duration.between(checkedAt, Instant.now()).compareTo(OFFLINE_GRACE) < 0) {
+                return Result.UNREACHABLE_BUT_CACHED;
+            }
+        } catch (Exception ignored) {
+            // fall through to INVALID
+        }
+        return Result.INVALID;
+    }
+}
+
+/*
+ * Wiring into TPABurstAddon (pseudocode -- adapt to your actual class):
+ *
+ *   @Override
+ *   public void onInitialize() {
+ *       ClientLifecycleEvents.CLIENT_STARTED.register(client -> {
+ *           LicenseGate.check(result -> {
+ *               if (result == LicenseGate.Result.VALID || result == LicenseGate.Result.UNREACHABLE_BUT_CACHED) {
+ *                   Modules.get().add(new TPABurst());
+ *                   Modules.get().add(new AutoLootSell());
+ *                   Modules.get().add(new AutoStrength());
+ *                   Modules.get().add(new SpawnerNotifier());
+ *               } else {
+ *                   System.err.println("[TPA Tools] License check failed -- modules not loaded.");
+ *               }
+ *           });
+ *       });
+ *   }
+ *
+ * Registering modules from a background thread's callback: make sure
+ * Modules.get().add(...) is safe to call off the render thread for your
+ * Meteor Client version, or hop back via client.execute(...) if not.
+ */
