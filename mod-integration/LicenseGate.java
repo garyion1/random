@@ -16,6 +16,9 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Properties;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /**
@@ -59,6 +62,28 @@ public final class LicenseGate {
         Thread thread = new Thread(() -> onResult.accept(checkBlocking()), "tpa-tools-license-check");
         thread.setDaemon(true);
         thread.start();
+    }
+
+    private static final ScheduledExecutorService SCHEDULER =
+        Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "tpa-tools-license-recheck");
+            t.setDaemon(true);
+            return t;
+        });
+
+    /**
+     * Re-runs the check on a fixed interval for as long as the game is open,
+     * so a key revoked (or unbound) mid-session takes effect within one
+     * interval instead of only on next launch. Call this once, right after
+     * the initial {@link #check(Consumer)} succeeds -- see the wiring
+     * example at the bottom of this file for how to actually pull modules
+     * back out when onResult reports something other than VALID.
+     */
+    public static void startPeriodicRecheck(Duration interval, Consumer<Result> onResult) {
+        SCHEDULER.scheduleWithFixedDelay(
+            () -> onResult.accept(checkBlocking()),
+            interval.toMillis(), interval.toMillis(), TimeUnit.MILLISECONDS
+        );
     }
 
     private static Result checkBlocking() {
@@ -155,17 +180,38 @@ public final class LicenseGate {
 }
 
 /*
- * Wiring into TPABurstAddon (pseudocode -- adapt to your actual class):
+ * Wiring into TPABurstAddon (pseudocode -- adapt to your actual class),
+ * including a live kill switch so a Discord /revoke actually pulls the
+ * modules out of a session that's already running, not just blocks the
+ * next launch:
+ *
+ *   private static List<Module> registered = List.of();
+ *   private static boolean disabled = false;
  *
  *   @Override
  *   public void onInitialize() {
  *       ClientLifecycleEvents.CLIENT_STARTED.register(client -> {
  *           LicenseGate.check(result -> {
  *               if (result == LicenseGate.Result.VALID || result == LicenseGate.Result.UNREACHABLE_BUT_CACHED) {
- *                   Modules.get().add(new TPABurst());
- *                   Modules.get().add(new AutoLootSell());
- *                   Modules.get().add(new AutoStrength());
- *                   Modules.get().add(new SpawnerNotifier());
+ *                   registered = List.of(new TPABurst(), new AutoLootSell(), new AutoStrength(), new SpawnerNotifier());
+ *                   registered.forEach(m -> Modules.get().add(m));
+ *
+ *                   // Re-check every 5 minutes for the rest of the session. A
+ *                   // /revoke or /unbind in Discord takes effect the next time
+ *                   // this fires, not instantly -- there's no server-to-client
+ *                   // push here, only polling.
+ *                   LicenseGate.startPeriodicRecheck(Duration.ofMinutes(5), recheckResult -> {
+ *                       if (recheckResult == LicenseGate.Result.INVALID && !disabled) {
+ *                           disabled = true;
+ *                           client.execute(() -> {
+ *                               for (Module m : registered) {
+ *                                   if (m.isActive()) m.toggle();
+ *                                   Modules.get().remove(m);
+ *                               }
+ *                           });
+ *                           System.err.println("[TPA Tools] License revoked -- modules disabled for this session.");
+ *                       }
+ *                   });
  *               } else {
  *                   System.err.println("[TPA Tools] License check failed -- modules not loaded.");
  *               }
@@ -173,7 +219,8 @@ public final class LicenseGate {
  *       });
  *   }
  *
- * Registering modules from a background thread's callback: make sure
- * Modules.get().add(...) is safe to call off the render thread for your
- * Meteor Client version, or hop back via client.execute(...) if not.
+ * Registering/removing modules from a background thread's callback: make
+ * sure Modules.get().add/remove(...) is safe to call off the render thread
+ * for your Meteor Client version, or hop back via client.execute(...) as
+ * shown above if not.
  */
