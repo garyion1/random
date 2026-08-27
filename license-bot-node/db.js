@@ -13,6 +13,7 @@ db.exec(`
     bound_username TEXT,
     bound_at REAL,
     created_at REAL NOT NULL,
+    expires_at REAL,
     revoked INTEGER NOT NULL DEFAULT 0,
     mismatch_attempts INTEGER NOT NULL DEFAULT 0,
     note TEXT
@@ -33,6 +34,20 @@ db.exec(`
   );
 `);
 
+// Migration for databases created before expires_at existed.
+try {
+  db.exec('ALTER TABLE licenses ADD COLUMN expires_at REAL');
+} catch {
+  // Column already exists -- fine.
+}
+
+// duration -> seconds. null means no expiry (lifetime).
+const DURATIONS = {
+  '3day': 3 * 24 * 60 * 60,
+  monthly: 30 * 24 * 60 * 60,
+  lifetime: null,
+};
+
 // Unambiguous alphabet: no 0/O, 1/I/L confusion.
 const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 
@@ -48,11 +63,17 @@ function generateKey() {
   return groups.join('-');
 }
 
-function createLicense(discordUserId, note) {
+function createLicense(discordUserId, note, duration = 'lifetime') {
+  if (!(duration in DURATIONS)) {
+    throw new Error(`Unknown duration "${duration}", expected one of: ${Object.keys(DURATIONS).join(', ')}`);
+  }
   const key = generateKey();
+  const now = Date.now() / 1000;
+  const seconds = DURATIONS[duration];
+  const expiresAt = seconds === null ? null : now + seconds;
   db.prepare(
-    'INSERT INTO licenses (key, discord_user_id, created_at, note) VALUES (?, ?, ?, ?)'
-  ).run(key, discordUserId, Date.now() / 1000, note ?? null);
+    'INSERT INTO licenses (key, discord_user_id, created_at, expires_at, note) VALUES (?, ?, ?, ?, ?)'
+  ).run(key, discordUserId, now, expiresAt, note ?? null);
   return key;
 }
 
@@ -124,6 +145,7 @@ function recentTamperLog(limit = 10) {
 }
 
 module.exports = {
+  DURATIONS,
   generateKey,
   createLicense,
   getLicense,

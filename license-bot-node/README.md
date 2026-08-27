@@ -10,10 +10,12 @@ auto-revokes.
 ## How it works
 
 - **Discord bot** (`bot.js`): admins run `/genkey @user` to mint a key,
-  DM'd to them automatically. Users check their own with `/mykeys`. Admins
-  can `/revoke` a key, `/unbind` it (reset to unbound, e.g. for a legitimate
-  account change), or `/lookup` one for support. "Admin" means listed in
-  `ADMIN_USER_IDS`, holding `ADMIN_ROLE_ID`, or — if you set
+  with an optional `duration` of `3day`, `monthly` (30 days), or `lifetime`
+  (default). The key is DM'd as a downloadable `license.txt` attachment.
+  Users check their own with `/mykeys`, which also shows each key's expiry.
+  Admins can `/revoke` a key, `/unbind` it (reset to unbound, e.g. for a
+  legitimate account change), or `/lookup` one for support. "Admin" means
+  listed in `ADMIN_USER_IDS`, holding `ADMIN_ROLE_ID`, or — if you set
   `TRUST_SERVER_ADMINS=true` — anyone with the Discord server's own
   Administrator permission. That last one is off by default; only turn it
   on for a server where you trust everyone with that permission to hand out

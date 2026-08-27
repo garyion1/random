@@ -39,7 +39,13 @@ function statusLine(lic) {
   if (lic.revoked) status = 'REVOKED';
   else if (lic.bound_uuid) status = `bound to \`${lic.bound_username || lic.bound_uuid}\``;
   else status = 'unbound (not yet activated)';
-  return `\`${lic.key}\` — ${status}`;
+
+  let expiry;
+  if (lic.expires_at === null || lic.expires_at === undefined) expiry = 'lifetime';
+  else if (Date.now() / 1000 > lic.expires_at) expiry = 'EXPIRED';
+  else expiry = `expires <t:${Math.floor(lic.expires_at)}:R>`;
+
+  return `\`${lic.key}\` — ${status} — ${expiry}`;
 }
 
 const commands = [
@@ -47,6 +53,16 @@ const commands = [
     .setName('genkey')
     .setDescription('[admin] Generate a new license key for a member')
     .addUserOption((o) => o.setName('member').setDescription('Who this key is for').setRequired(true))
+    .addStringOption((o) =>
+      o
+        .setName('duration')
+        .setDescription('How long the key is valid for (default: lifetime)')
+        .addChoices(
+          { name: '3 days', value: '3day' },
+          { name: 'Monthly (30 days)', value: 'monthly' },
+          { name: 'Lifetime', value: 'lifetime' }
+        )
+    )
     .addStringOption((o) => o.setName('note').setDescription('Optional note (e.g. order id)')),
   new SlashCommandBuilder().setName('mykeys').setDescription('See your own license keys and their status'),
   new SlashCommandBuilder()
@@ -105,8 +121,10 @@ client.on('interactionCreate', async (interaction) => {
         }
         const member = interaction.options.getUser('member', true);
         const note = interaction.options.getString('note');
-        const key = db.createLicense(member.id, note);
+        const duration = interaction.options.getString('duration') ?? 'lifetime';
+        const key = db.createLicense(member.id, note, duration);
 
+        const durationLabel = { '3day': '3 days', monthly: '30 days', lifetime: 'lifetime, never expires' }[duration];
         const licenseFile = new AttachmentBuilder(Buffer.from(key, 'utf-8'), { name: 'license.txt' });
 
         let dmSent = true;
@@ -115,6 +133,7 @@ client.on('interactionCreate', async (interaction) => {
             content:
               "You've been issued a TPA Tools license key — the attached file is yours, " +
               "personal to you, don't share it.\n\n" +
+              `This key is valid for: **${durationLabel}**.\n\n` +
               "Drop `license.txt` straight into the mod's config folder " +
               "(`config/tpa-tools/license.txt`, replacing whatever's already there). " +
               "It activates on the first Minecraft account that uses it and won't work " +
@@ -125,7 +144,7 @@ client.on('interactionCreate', async (interaction) => {
           dmSent = false;
         }
 
-        let msg = `Created key \`${key}\` for <@${member.id}>.`;
+        let msg = `Created key \`${key}\` for <@${member.id}> (${durationLabel}).`;
         if (!dmSent) msg += "\n⚠️ Couldn't DM them (DMs closed) — you'll need to send it manually.";
         return interaction.reply({ content: msg, ephemeral: true });
       }

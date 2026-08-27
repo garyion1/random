@@ -81,6 +81,9 @@ app.post('/validate', (req, res) => {
   if (lic.revoked) {
     return res.json({ valid: false, reason: 'revoked' });
   }
+  if (lic.expires_at !== null && Date.now() / 1000 > lic.expires_at) {
+    return res.json({ valid: false, reason: 'expired' });
+  }
 
   if (!lic.bound_uuid) {
     db.bindLicense(key, uuid, username);
