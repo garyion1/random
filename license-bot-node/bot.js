@@ -5,6 +5,7 @@ const {
   REST,
   Routes,
   PermissionFlagsBits,
+  AttachmentBuilder,
 } = require('discord.js');
 const db = require('./db');
 
@@ -106,14 +107,20 @@ client.on('interactionCreate', async (interaction) => {
         const note = interaction.options.getString('note');
         const key = db.createLicense(member.id, note);
 
+        const licenseFile = new AttachmentBuilder(Buffer.from(key, 'utf-8'), { name: 'license.txt' });
+
         let dmSent = true;
         try {
-          await member.send(
-            `You've been issued a TPA Tools license key:\n\`${key}\`\n\n` +
-              "Put this in your mod config. It activates on the first Minecraft " +
-              "account that uses it and won't work on any other account after that, " +
-              "so don't share it."
-          );
+          await member.send({
+            content:
+              "You've been issued a TPA Tools license key — the attached file is yours, " +
+              "personal to you, don't share it.\n\n" +
+              "Drop `license.txt` straight into the mod's config folder " +
+              "(`config/tpa-tools/license.txt`, replacing whatever's already there). " +
+              "It activates on the first Minecraft account that uses it and won't work " +
+              "on any other account after that.",
+            files: [licenseFile],
+          });
         } catch {
           dmSent = false;
         }
