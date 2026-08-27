@@ -8,6 +8,17 @@ if (!API_SHARED_SECRET) {
 
 const MAX_MISMATCH_ATTEMPTS = parseInt(process.env.MAX_MISMATCH_ATTEMPTS || '5', 10);
 
+// If true, a jar hash that doesn't match any registered known-good build
+// also fails the license check outright, not just logs+alerts. Off by
+// default so a version rollout (before you've run /addhash for the new
+// build) doesn't lock out legitimate users.
+const DENY_ON_TAMPER = process.env.DENY_ON_TAMPER === 'true';
+
+let tamperNotifier = null;
+function setTamperNotifier(fn) {
+  tamperNotifier = fn;
+}
+
 // Very small per-IP rate limit so the endpoint can't be hammered to brute
 // force key guesses or spam the mismatch counter. Not a substitute for a
 // real reverse-proxy rate limiter if you're worried about serious abuse.
@@ -39,9 +50,28 @@ app.post('/validate', (req, res) => {
     return res.status(429).json({ valid: false, reason: 'rate_limited' });
   }
 
-  const { key, minecraft_uuid: uuid, minecraft_username: username } = req.body || {};
+  const {
+    key,
+    minecraft_uuid: uuid,
+    minecraft_username: username,
+    jar_sha256: jarHash,
+  } = req.body || {};
   if (!key || !uuid) {
     return res.status(400).json({ valid: false, reason: 'missing_fields' });
+  }
+
+  let tamperDetected = false;
+  if (jarHash && db.hasAnyKnownHash() && !db.isKnownHash(jarHash)) {
+    tamperDetected = true;
+    db.logTamper(key, uuid, jarHash);
+    if (tamperNotifier) {
+      tamperNotifier({ key, uuid, username, jarHash }).catch((e) =>
+        console.error('tamper notifier failed:', e)
+      );
+    }
+    if (DENY_ON_TAMPER) {
+      return res.json({ valid: false, reason: 'tampered_jar' });
+    }
   }
 
   const lic = db.getLicense(key);
@@ -54,11 +84,11 @@ app.post('/validate', (req, res) => {
 
   if (!lic.bound_uuid) {
     db.bindLicense(key, uuid, username);
-    return res.json({ valid: true });
+    return res.json({ valid: true, tamper_detected: tamperDetected });
   }
 
   if (lic.bound_uuid === uuid) {
-    return res.json({ valid: true });
+    return res.json({ valid: true, tamper_detected: tamperDetected });
   }
 
   db.recordMismatch(key);
@@ -70,4 +100,4 @@ app.post('/validate', (req, res) => {
   return res.json({ valid: false, reason: 'bound_to_another_account' });
 });
 
-module.exports = app;
+module.exports = { app, setTamperNotifier };

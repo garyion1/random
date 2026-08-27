@@ -50,6 +50,20 @@ const commands = [
     .setName('unbind')
     .setDescription("[admin] Unbind a key so it can activate on a new Minecraft account")
     .addStringOption((o) => o.setName('key').setDescription('The license key to unbind').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('addhash')
+    .setDescription('[admin] Register a known-good jar hash for the build you just shipped')
+    .addStringOption((o) => o.setName('sha256').setDescription('SHA-256 of the jar').setRequired(true))
+    .addStringOption((o) => o.setName('label').setDescription('e.g. version number')),
+  new SlashCommandBuilder()
+    .setName('removehash')
+    .setDescription('[admin] Remove a known-good jar hash')
+    .addStringOption((o) => o.setName('sha256').setDescription('SHA-256 to remove').setRequired(true)),
+  new SlashCommandBuilder().setName('hashes').setDescription('[admin] List registered known-good jar hashes'),
+  new SlashCommandBuilder()
+    .setName('tamperlog')
+    .setDescription('[admin] Show recent tampered-jar detections')
+    .addIntegerOption((o) => o.setName('limit').setDescription('How many to show (default 10)')),
 ].map((c) => c.toJSON());
 
 async function registerCommands() {
@@ -145,6 +159,61 @@ client.on('interactionCreate', async (interaction) => {
           ephemeral: true,
         });
       }
+
+      case 'addhash': {
+        if (!isAdmin(interaction)) {
+          return interaction.reply({ content: "You can't use this command.", ephemeral: true });
+        }
+        const sha256 = interaction.options.getString('sha256', true).trim();
+        if (!/^[0-9a-fA-F]{64}$/.test(sha256)) {
+          return interaction.reply({ content: 'That doesn\'t look like a SHA-256 hash (64 hex chars).', ephemeral: true });
+        }
+        const label = interaction.options.getString('label');
+        db.addKnownHash(sha256, label);
+        return interaction.reply({ content: `Registered \`${sha256}\`${label ? ` (${label})` : ''} as known-good.`, ephemeral: true });
+      }
+
+      case 'removehash': {
+        if (!isAdmin(interaction)) {
+          return interaction.reply({ content: "You can't use this command.", ephemeral: true });
+        }
+        const sha256 = interaction.options.getString('sha256', true).trim();
+        const ok = db.removeKnownHash(sha256);
+        return interaction.reply({ content: ok ? 'Removed.' : 'No such hash.', ephemeral: true });
+      }
+
+      case 'hashes': {
+        if (!isAdmin(interaction)) {
+          return interaction.reply({ content: "You can't use this command.", ephemeral: true });
+        }
+        const rows = db.listKnownHashes();
+        if (!rows.length) {
+          return interaction.reply({
+            content: 'No known-good hashes registered yet — every jar hash will be treated as untampered until you add one.',
+            ephemeral: true,
+          });
+        }
+        return interaction.reply({
+          content: rows.map((r) => `\`${r.sha256}\`${r.label ? ` — ${r.label}` : ''}`).join('\n'),
+          ephemeral: true,
+        });
+      }
+
+      case 'tamperlog': {
+        if (!isAdmin(interaction)) {
+          return interaction.reply({ content: "You can't use this command.", ephemeral: true });
+        }
+        const limit = interaction.options.getInteger('limit') ?? 10;
+        const rows = db.recentTamperLog(limit);
+        if (!rows.length) {
+          return interaction.reply({ content: 'No tamper detections logged.', ephemeral: true });
+        }
+        const lines = rows.map(
+          (r) =>
+            `<t:${Math.floor(r.detected_at)}:R> key \`${r.key || '?'}\` uuid \`${r.minecraft_uuid || '?'}\` hash \`${r.jar_sha256}\``
+        );
+        return interaction.reply({ content: lines.join('\n'), ephemeral: true });
+      }
     }
   } catch (err) {
     console.error(err);
@@ -154,4 +223,21 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-module.exports = client;
+async function notifyTamper({ key, uuid, username, jarHash }) {
+  const message =
+    `⚠️ **Tampered jar detected**\n` +
+    `Key: \`${key || 'unknown'}\`\n` +
+    `Minecraft account: \`${username || uuid}\`\n` +
+    `Jar SHA-256: \`${jarHash}\` (not a registered known-good build)`;
+
+  for (const adminId of ADMIN_USER_IDS) {
+    try {
+      const user = await client.users.fetch(adminId);
+      await user.send(message);
+    } catch (e) {
+      console.error(`Could not DM admin ${adminId} about tamper detection:`, e.message);
+    }
+  }
+}
+
+module.exports = { client, notifyTamper };

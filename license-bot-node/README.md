@@ -14,13 +14,26 @@ auto-revokes.
   can `/revoke` a key, `/unbind` it (reset to unbound, e.g. for a legitimate
   account change), or `/lookup` one for support.
 - **HTTP API** (`api.js`, Express): exposes `POST /validate`, which the mod
-  calls on startup with the license key and the player's Minecraft UUID.
-- Both run in one process (`index.js`) sharing one SQLite database
+  calls on startup (and periodically after that, if you wire up
+  `LicenseGate.startPeriodicRecheck` — see `mod-integration/`) with the
+  license key and the player's Minecraft UUID. A revoke/unbind takes effect
+  on the next recheck, not just on next launch.
+- **Tamper detection**: the mod hashes its own jar file and sends that along
+  too. Register the hash of every build you actually ship with
+  `/addhash <sha256> [label]` (get the hash with `node hash-jar.js
+  path/to/tpatools.jar`). Any request carrying a jar hash you haven't
+  registered gets logged (`/tamperlog`) and DMs every admin — that's someone
+  running a modified copy, most likely one with the license check patched
+  out. Until you've registered at least one hash, nothing gets flagged (so a
+  fresh deploy doesn't alert on every legitimate user by default).
+- Everything runs in one process (`index.js`) sharing one SQLite database
   (`licenses.db`, via `better-sqlite3`).
 
 Verified locally: `npm install` installs cleanly, and `POST /validate`
-correctly rejects an unknown key and a wrong `X-Api-Secret` before you ever
-touch a real Discord token.
+correctly rejects an unknown key, a wrong `X-Api-Secret`, and correctly
+flags+notifies on a jar hash that doesn't match a registered known-good
+build (and does nothing when it matches) — tested directly against a
+running instance, not just read over.
 
 ## Setup
 
@@ -64,7 +77,16 @@ Cloudflare's DNS.
 
 ## API contract
 
-Identical to the Python version — see `license-bot/README.md` for the full
-`POST /validate` request/response shape and the honest limits of this
-approach (it stops casual key-sharing; it isn't tamper-proof against someone
-willing to patch the client-side check out of their own copy).
+`POST /validate` body now also accepts an optional `jar_sha256` field (see
+Tamper detection above); everything else matches the Python version — see
+`license-bot/README.md` for the full request/response shape.
+
+## Honest limit of tamper detection
+
+This tells you *that* a file was modified, not who did it beyond whichever
+license key and Minecraft account it was used with — and like every check
+here, it depends on the mod's own reporting code being intact. Someone
+skilled enough to patch out the license check could also patch out (or
+spoof) the hash it reports. What it reliably catches is the common case:
+someone runs a casually-patched copy without also disabling this specific
+reporting call.

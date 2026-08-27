@@ -3,6 +3,7 @@ package me.tpaburst;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import net.fabricmc.loader.api.FabricLoader;
+import net.fabricmc.loader.api.metadata.ModOrigin;
 import net.minecraft.client.MinecraftClient;
 
 import java.io.IOException;
@@ -13,8 +14,12 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HexFormat;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -108,6 +113,7 @@ public final class LicenseGate {
         body.addProperty("key", key.trim());
         body.addProperty("minecraft_uuid", uuid);
         body.addProperty("minecraft_username", username);
+        computeJarHash().ifPresent(hash -> body.addProperty("jar_sha256", hash));
 
         HttpRequest request = HttpRequest.newBuilder()
             .uri(URI.create(LICENSE_API_URL))
@@ -134,6 +140,33 @@ public final class LicenseGate {
         } catch (IOException | InterruptedException e) {
             System.err.println("[TPA Tools] Could not reach license server: " + e.getMessage());
             return checkCacheForGracePeriod();
+        }
+    }
+
+    /**
+     * Hashes the actual jar file this mod was loaded from, so the server can
+     * tell if it's been modified (most commonly: someone patched this exact
+     * license check out of their local copy). Register the hash of every
+     * build you ship with the bot's /addhash command -- an unrecognized hash
+     * gets logged and alerted, not silently ignored.
+     */
+    private static Optional<String> computeJarHash() {
+        try {
+            var container = FabricLoader.getInstance().getModContainer("tpa-tools");
+            if (container.isEmpty()) return Optional.empty();
+
+            ModOrigin origin = container.get().getOrigin();
+            var paths = origin.getPaths();
+            if (paths.isEmpty()) return Optional.empty();
+
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            for (Path path : paths) {
+                digest.update(Files.readAllBytes(path));
+            }
+            return Optional.of(HexFormat.of().formatHex(digest.digest()));
+        } catch (IOException | NoSuchAlgorithmException | RuntimeException e) {
+            System.err.println("[TPA Tools] Could not hash own jar: " + e.getMessage());
+            return Optional.empty();
         }
     }
 

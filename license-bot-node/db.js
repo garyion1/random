@@ -16,7 +16,21 @@ db.exec(`
     revoked INTEGER NOT NULL DEFAULT 0,
     mismatch_attempts INTEGER NOT NULL DEFAULT 0,
     note TEXT
-  )
+  );
+
+  CREATE TABLE IF NOT EXISTS known_hashes (
+    sha256 TEXT PRIMARY KEY,
+    label TEXT,
+    added_at REAL NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS tamper_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT,
+    minecraft_uuid TEXT,
+    jar_sha256 TEXT,
+    detected_at REAL NOT NULL
+  );
 `);
 
 // Unambiguous alphabet: no 0/O, 1/I/L confusion.
@@ -76,6 +90,39 @@ function recordMismatch(key) {
   db.prepare('UPDATE licenses SET mismatch_attempts = mismatch_attempts + 1 WHERE key = ?').run(key);
 }
 
+function addKnownHash(sha256, label) {
+  db.prepare(
+    'INSERT OR REPLACE INTO known_hashes (sha256, label, added_at) VALUES (?, ?, ?)'
+  ).run(sha256.toLowerCase(), label ?? null, Date.now() / 1000);
+}
+
+function removeKnownHash(sha256) {
+  const info = db.prepare('DELETE FROM known_hashes WHERE sha256 = ?').run(sha256.toLowerCase());
+  return info.changes > 0;
+}
+
+function listKnownHashes() {
+  return db.prepare('SELECT * FROM known_hashes ORDER BY added_at DESC').all();
+}
+
+function isKnownHash(sha256) {
+  return !!db.prepare('SELECT 1 FROM known_hashes WHERE sha256 = ?').get(sha256.toLowerCase());
+}
+
+function hasAnyKnownHash() {
+  return !!db.prepare('SELECT 1 FROM known_hashes LIMIT 1').get();
+}
+
+function logTamper(key, minecraftUuid, jarSha256) {
+  db.prepare(
+    'INSERT INTO tamper_log (key, minecraft_uuid, jar_sha256, detected_at) VALUES (?, ?, ?, ?)'
+  ).run(key ?? null, minecraftUuid ?? null, jarSha256, Date.now() / 1000);
+}
+
+function recentTamperLog(limit = 10) {
+  return db.prepare('SELECT * FROM tamper_log ORDER BY detected_at DESC LIMIT ?').all(limit);
+}
+
 module.exports = {
   generateKey,
   createLicense,
@@ -85,4 +132,11 @@ module.exports = {
   unbindLicense,
   bindLicense,
   recordMismatch,
+  addKnownHash,
+  removeKnownHash,
+  listKnownHashes,
+  isKnownHash,
+  hasAnyKnownHash,
+  logTamper,
+  recentTamperLog,
 };
